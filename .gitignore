@@ -1,0 +1,16 @@
+# Local IDE workspaces and verification artifacts
+.local/
+**/.metadata/
+
+# CubeIDE build output
+**/Debug/
+**/Release/
+
+# CubeMX transient files
+**/mx.scratch
+**/*.bak
+**/*.log
+
+# Course documents remain local; keep lesson diffs focused on firmware.
+*.[mM][dD]
+/docs/
