@@ -42,7 +42,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+const unsigned limit = 100u;
+unsigned period_ms = 500u;
+unsigned event_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -98,7 +100,12 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-    HAL_Delay(250);
+    HAL_Delay(period_ms);
+    event_count++;
+    if (event_count >= limit)
+    {
+      event_count = 0u;
+    }
   }
   /* USER CODE END 3 */
 }
