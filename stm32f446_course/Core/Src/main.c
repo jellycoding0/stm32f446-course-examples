@@ -114,7 +114,14 @@ int main(void)
     if ((uint32_t)(now - last) >= 500u)
     {
       last = now;
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+      /* 20강: 이전 Tag의 HAL Toggle과 같은 조건에서 레지스터로 구현함. */
+      /* PA5는 main만 제어함. 초기 Low, Push-Pull/No Pull/Low speed 유지. */
+      uint32_t pins = GPIO_PIN_5;
+      uint32_t odr = GPIOA->ODR;
+      /* BSRR 하위 비트는 Set, 상위 비트는 Reset 명령임. */
+      GPIOA->BSRR = ((odr & pins) << 16u) | (~odr & pins);
+      /* HAL 구현도 같은 방식임. Toggle 전체는 읽은 ODR에 의존하므로 */
+      /* 같은 핀을 다른 실행 흐름에서도 Toggle하면 경쟁이 생길 수 있음. */
     }
     /* 다른 작업이 오래 걸리면 LED 전환도 늦어짐. 하드웨어 파형은 아님. */
     /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
