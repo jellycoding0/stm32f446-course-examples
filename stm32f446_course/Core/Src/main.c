@@ -89,6 +89,7 @@ static void MX_USART2_UART_Init(void);
 static void Button_Poll(void);
 static enum RxResult Rx_Pop(uint8_t *byte);
 static void Rx_Recover(void);
+static void Uart_ProcessBudget(uint32_t budget);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -174,23 +175,11 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Rx_Recover();
-    /* DMA 128바이트와 소프트웨어 큐 256칸(유효 255바이트)은 별개임. */
-    uint8_t byte;
-    enum RxResult result = Rx_Pop(&byte);
-    if (result == RX_BYTE)
-    {
-      uart_rx_count++;
-      uart_last_rx_byte = byte;
-      Parser_Feed(byte);
-    }
-    else if (result == RX_GAP)
-    {
-      /* 다음 바이트 전에 조립 중인 패킷을 폐기함. ISR에서는 파서를 만지지 않음. */
-      Parser_Reset();
-      rx_gap_count++;
-    }
     /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
     Button_Poll();
+    /* 31강: 큐가 빌 때까지 무제한 처리하지 않고 다음 루프에 실행을 넘김. */
+    Uart_ProcessBudget(16u);
+    /* 16바이트는 처리량 상한임. 실행 시간/마감 시간 보장은 별도 측정이 필요함. */
   }
   /* USER CODE END 3 */
 }
@@ -420,6 +409,29 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void Uart_ProcessBudget(uint32_t budget)
+{
+  for (uint32_t i = 0u; i < budget; ++i)
+  {
+    uint8_t byte;
+    enum RxResult result = Rx_Pop(&byte);
+    if (result == RX_EMPTY)
+    {
+      break;
+    }
+    if (result == RX_GAP)
+    {
+      /* 다음 바이트 전에 조립 중인 패킷을 폐기함. */
+      Parser_Reset();
+      rx_gap_count++;
+      break;
+    }
+    uart_rx_count++;
+    uart_last_rx_byte = byte;
+    Parser_Feed(byte);
+  }
+}
+
 void Packet_OnValid(const uint8_t *data, uint8_t length)
 {
   /* 검증된 Payload를 관찰용 배열로 복사함. LED/PWM 명령으로 임의 해석하지 않음. */
