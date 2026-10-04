@@ -40,6 +40,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN PV */
 /* 관찰: 현재 입력, 확정 상태, EXTI 횟수와 확정된 눌림 횟수를 비교함. */
@@ -49,11 +50,14 @@ volatile uint32_t button_exti_count;
 volatile uint32_t button_press_count;
 static bool button_candidate;
 static uint32_t button_changed_at;
+/* 실제 Update 총횟수가 아니라 main이 UIF를 처리한 횟수임. */
+volatile uint32_t tim6_poll_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 static void Button_Poll(void);
 /* USER CODE END PFP */
@@ -92,13 +96,20 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
   button_raw_pressed = button_candidate;
   button_changed_at = HAL_GetTick();
-  uint32_t last = HAL_GetTick();
-  /* 19강: SysTick_Handler의 HAL_IncTick이 기본 1ms 시간 기준을 만듦. */
+  /* 21강: TIM6 84MHz / (8399+1) / (999+1) = 10Hz, Update 간격 100ms. */
+  /* HAL 초기화의 UG가 버퍼링된 PSC를 반영하며 UIF도 세울 수 있음. */
+  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+  /* 폴링 실습이므로 Start_IT 대신 Start를 사용함. */
+  if (HAL_TIM_Base_Start(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -108,22 +119,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint32_t now = HAL_GetTick();
-    /* HAL_Delay와 달리 기다리지 않으므로 매 루프에서 버튼도 처리함. */
-    /* unsigned 차이를 사용하며, tick 전체 순환보다 자주 검사해야 함. */
-    if ((uint32_t)(now - last) >= 500u)
+    /* CNT는 하드웨어가 증가시키고, CPU는 Update 플래그를 확인함. */
+    if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE) != RESET)
     {
-      last = now;
-      /* 20강: 이전 Tag의 HAL Toggle과 같은 조건에서 레지스터로 구현함. */
-      /* PA5는 main만 제어함. 초기 Low, Push-Pull/No Pull/Low speed 유지. */
-      uint32_t pins = GPIO_PIN_5;
-      uint32_t odr = GPIOA->ODR;
-      /* BSRR 하위 비트는 Set, 상위 비트는 Reset 명령임. */
-      GPIOA->BSRR = ((odr & pins) << 16u) | (~odr & pins);
-      /* HAL 구현도 같은 방식임. Toggle 전체는 읽은 ODR에 의존하므로 */
-      /* 같은 핀을 다른 실행 흐름에서도 Toggle하면 경쟁이 생길 수 있음. */
+      __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+      tim6_poll_count++;
+      /* 전환 간격 약 100ms, LED 전체 점멸 주기 약 200ms. */
+      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
     }
-    /* 다른 작업이 오래 걸리면 LED 전환도 늦어짐. 하드웨어 파형은 아님. */
+    /* UIF는 누적 카운터가 아님. 폴링이 늦으면 여러 Update가 합쳐짐. */
+    /* LED 전환도 main 실행에 따라 늦어짐. TIM6에는 PWM 출력이 없음. */
     /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
     Button_Poll();
   }
@@ -175,6 +180,44 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 8399;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 999;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
+
 }
 
 /**
