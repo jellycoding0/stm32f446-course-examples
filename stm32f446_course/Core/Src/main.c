@@ -50,8 +50,8 @@ volatile uint32_t button_exti_count;
 volatile uint32_t button_press_count;
 static bool button_candidate;
 static uint32_t button_changed_at;
-/* 실제 Update 총횟수가 아니라 main이 UIF를 처리한 횟수임. */
-volatile uint32_t tim6_poll_count;
+/* 관찰: TIM6 콜백 처리 횟수. 인터럽트 지연 중 합쳐진 Update는 세지 못함. */
+volatile uint32_t tim6_irq_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,11 +102,15 @@ int main(void)
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
   button_raw_pressed = button_candidate;
   button_changed_at = HAL_GetTick();
-  /* 21강: TIM6 84MHz / (8399+1) / (999+1) = 10Hz, Update 간격 100ms. */
+  /* 23강: TIM6 84MHz / (8399+1) / (999+1) = 10Hz, Update 간격 100ms. */
   /* HAL 초기화의 UG가 버퍼링된 PSC를 반영하며 UIF도 세울 수 있음. */
   __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
-  /* 폴링 실습이므로 Start_IT 대신 Start를 사용함. */
-  if (HAL_TIM_Base_Start(&htim6) != HAL_OK)
+  HAL_NVIC_ClearPendingIRQ(TIM6_DAC_IRQn);
+  /* HAL_Init의 Group 4 유지: 선점 4비트, 서브 0비트. MSP의 0을 덮어씀. */
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 5, 0);
+  /* 관찰: NVIC_GetPriorityGrouping() == 3, TIM6 논리 우선순위 == 5. */
+  /* NVIC 허용은 MSP에서 생성됨. Start_IT는 TIM6의 UIE와 카운터를 켬. */
+  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
   {
     Error_Handler();
   }
@@ -119,16 +123,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* CNT는 하드웨어가 증가시키고, CPU는 Update 플래그를 확인함. */
-    if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE) != RESET)
-    {
-      __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
-      tim6_poll_count++;
-      /* 전환 간격 약 100ms, LED 전체 점멸 주기 약 200ms. */
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    }
-    /* UIF는 누적 카운터가 아님. 폴링이 늦으면 여러 Update가 합쳐짐. */
-    /* LED 전환도 main 실행에 따라 늦어짐. TIM6에는 PWM 출력이 없음. */
+    /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
     /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
     Button_Poll();
   }
@@ -283,8 +278,21 @@ static void Button_Poll(void)
     if (button_stable_pressed)
     {
       button_press_count++;
-      /* LED는 main의 주기 처리만 제어하고, 버튼은 눌림 횟수만 기록함. */
+      /* 버튼은 눌림 횟수만 기록하고 LED를 변경하지 않음. */
     }
+  }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM6)
+  {
+    /* TIM6_DAC_IRQHandler -> HAL_TIM_IRQHandler -> 이 콜백 순서임. */
+    /* HAL이 UIF/UIE 확인과 UIF 해제를 수행함. DAC 인터럽트는 사용하지 않음. */
+    tim6_irq_count++;
+    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    /* 약 100ms마다 전환. ISR에서는 대기하지 않음. */
+    /* 인터럽트 마스킹/선점으로 전환이 늦어질 수 있어 정밀 PWM은 아님. */
   }
 }
 
