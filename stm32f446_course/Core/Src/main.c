@@ -26,12 +26,12 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+enum RxResult { RX_EMPTY, RX_BYTE, RX_GAP };
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define RX_CAP 64u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -55,12 +55,19 @@ static bool button_candidate;
 static uint32_t button_changed_at;
 /* 관찰: TIM6 콜백 처리 횟수. 인터럽트 지연 중 합쳐진 Update는 세지 못함. */
 volatile uint32_t tim6_irq_count;
-volatile uint32_t uart_tx_count;
-volatile uint32_t uart_tx_failures;
 volatile uint32_t uart_rx_count;
-volatile uint32_t uart_rx_timeouts;
 volatile uint32_t uart_rx_errors;
 volatile uint32_t uart_last_rx_error;
+volatile uint8_t uart_last_rx_byte;
+static uint8_t rx_byte;
+static uint8_t rx_buf[RX_CAP];
+static volatile uint32_t head, tail;
+static volatile uint32_t rx_dropped;
+static volatile bool rx_overflow;
+static volatile bool rx_restart_pending;
+volatile uint32_t rx_rearm_fail;
+volatile uint32_t rx_gap_count;
+volatile uint32_t rx_recovery_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,6 +78,8 @@ static void MX_TIM2_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void Button_Poll(void);
+static enum RxResult Rx_Pop(uint8_t *byte);
+static void Rx_Recover(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -111,6 +120,13 @@ int main(void)
   MX_TIM2_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* 27강: Group 4에서 USART2 선점 우선순위 5. 생성된 MSP의 0을 덮어씀. */
+  HAL_NVIC_SetPriority(USART2_IRQn, 5u, 0u);
+  HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
+  if (HAL_UART_Receive_IT(&huart2, &rx_byte, 1u) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* 25강: PCLK1=42MHz、115200/8N1、16배 샘플링. 현재 HAL의 BRR=0x016C. */
   /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
@@ -144,38 +160,21 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* 26강: main만 UART를 소유하며, 받은 1바이트를 그대로 돌려보냄. */
+    Rx_Recover();
+    /* ISR은 저장, main은 소비. 배열 64칸 중 63바이트를 사용할 수 있음. */
     uint8_t byte;
-    HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, &byte, 1u, 10u);
-    /* 다음 UART API가 오류값을 바꾸기 전에 보관함. */
-    uint32_t error = HAL_UART_GetError(&huart2);
-    uart_last_rx_error = error;
-    if (status == HAL_OK)
+    enum RxResult result = Rx_Pop(&byte);
+    if (result == RX_BYTE)
     {
       uart_rx_count++;
-      /* 송신은 새 10ms 예산을 사용하며 HAL 내부에서 TXE와 TC를 기다림. */
-      if (HAL_UART_Transmit(&huart2, &byte, 1u, 10u) == HAL_OK)
-      {
-        uart_tx_count++;
-      }
-      else
-      {
-        uart_tx_failures++;
-      }
+      uart_last_rx_byte = byte;
     }
-    else if (error != HAL_UART_ERROR_NONE || status != HAL_TIMEOUT)
+    else if (result == RX_GAP)
     {
-      /* 현재 HAL은 RXNE 대기 중 ORE도 HAL_TIMEOUT으로 반환할 수 있음. */
-      uart_rx_errors++;
+      /* 손실 전후 데이터를 이어 붙이지 않음. 향후 파서는 여기서 초기화함. */
+      rx_gap_count++;
     }
-    else
-    {
-      uart_rx_timeouts++;
-    }
-    /* HAL의 timeout은 경과 tick > 10일 때 성립하며 SysTick이 필요함. */
-    /* 폴링 대기 동안 main의 버튼 처리는 늦어지나 허용된 ISR은 실행됨. */
     /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
-    /* UART 대기 때문에 짧은 버튼 변화는 놓칠 수 있음. */
     Button_Poll();
   }
   /* USER CODE END 3 */
@@ -390,6 +389,106 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void Rx_PushFromISR(uint8_t byte)
+{
+  uint32_t next = (head + 1u) % RX_CAP;
+  if (rx_overflow || next == tail)
+  {
+    rx_overflow = true;
+    rx_dropped++;
+    return;
+  }
+  rx_buf[head] = byte;
+  head = next;
+}
+
+static enum RxResult Rx_Pop(uint8_t *byte)
+{
+  /* volatile만으로 보호되지 않음. 짧게 마스킹하고 이전 상태를 복원함. */
+  uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  enum RxResult result = RX_EMPTY;
+  if (rx_overflow)
+  {
+    rx_dropped += (head + RX_CAP - tail) % RX_CAP;
+    tail = head;
+    rx_overflow = false;
+    result = RX_GAP;
+  }
+  else if (head != tail)
+  {
+    *byte = rx_buf[tail];
+    tail = (tail + 1u) % RX_CAP;
+    result = RX_BYTE;
+  }
+  __set_PRIMASK(saved);
+  return result;
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    /* 오류가 있는 바이트는 큐에 넣지 않음. 재수신하면 ErrorCode가 지워짐. */
+    /* 뒤이어 호출될 ErrorCallback이 기록하고 main의 Rx_Recover가 재시작함. */
+    if (HAL_UART_GetError(huart) != HAL_UART_ERROR_NONE)
+    {
+      return;
+    }
+    Rx_PushFromISR(rx_byte);
+    if (!rx_restart_pending &&
+        HAL_UART_Receive_IT(huart, &rx_byte, 1u) != HAL_OK)
+    {
+      rx_rearm_fail++;
+      rx_overflow = true;
+      rx_restart_pending = true;
+    }
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    uart_last_rx_error = HAL_UART_GetError(huart);
+    uart_rx_errors++;
+    rx_overflow = true;
+    rx_restart_pending = true;
+  }
+}
+
+static void Rx_Recover(void)
+{
+  if (!rx_restart_pending)
+  {
+    return;
+  }
+  /* main에서만 복구. 이 강의는 DMA 없이 1바이트 IT 수신만 사용함. */
+  uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  HAL_StatusTypeDef status = HAL_UART_AbortReceive(&huart2);
+  if (status == HAL_OK)
+  {
+    /* 수신을 멈춘 뒤 SR->DR로 잔여 오류/데이터를 버림. */
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
+    HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
+    /* 큐는 다음 Rx_Pop에서 비우고 RX_GAP을 먼저 전달함. */
+    rx_overflow = true;
+    status = HAL_UART_Receive_IT(&huart2, &rx_byte, 1u);
+  }
+  if (status == HAL_OK)
+  {
+    rx_restart_pending = false;
+    rx_recovery_count++;
+  }
+  __set_PRIMASK(saved);
+  if (status != HAL_OK)
+  {
+    /* 복구 실패를 무한 재시도로 숨기지 않음. */
+    Error_Handler();
+  }
+}
+
 static void Button_Poll(void)
 {
   bool raw = (GPIOC->IDR & (1u << 13)) == 0u;
