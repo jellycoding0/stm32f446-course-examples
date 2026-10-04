@@ -17,23 +17,22 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
+#include "app_threadx.h"
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdbool.h>
-#include "packet_parser.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-enum RxResult { RX_EMPTY, RX_BYTE, RX_GAP };
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define RX_CAP 256u
-#define DMA_RX_CAP 128u
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,33 +48,7 @@ UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
-/* 관찰: 현재 입력, 확정 상태, EXTI 횟수와 확정된 눌림 횟수를 비교함. */
-volatile bool button_raw_pressed;
-volatile bool button_stable_pressed;
-volatile uint32_t button_exti_count;
-volatile uint32_t button_press_count;
-static bool button_candidate;
-static uint32_t button_changed_at;
-/* 관찰: TIM6 콜백 처리 횟수. 인터럽트 지연 중 합쳐진 Update는 세지 못함. */
-volatile uint32_t tim6_irq_count;
-volatile uint32_t uart_rx_count;
-volatile uint32_t uart_rx_errors;
-volatile uint32_t uart_last_rx_error;
-volatile uint8_t uart_last_rx_byte;
-static uint8_t dma_rx[DMA_RX_CAP];
-static uint16_t consumed;
-static uint8_t rx_buf[RX_CAP];
-static volatile uint32_t head, tail;
-static volatile uint32_t rx_dropped;
-static volatile bool rx_overflow;
-static volatile bool rx_restart_pending;
-volatile uint32_t rx_dma_errors;
-volatile uint32_t rx_dma_last_error;
-volatile uint32_t rx_gap_count;
-volatile uint32_t rx_recovery_count;
-volatile uint32_t packet_valid_count;
-volatile uint8_t packet_last_length;
-volatile uint8_t packet_last_payload[32];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -86,10 +59,7 @@ static void MX_TIM6_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-static void Button_Poll(void);
-static enum RxResult Rx_Pop(uint8_t *byte);
-static void Rx_Recover(void);
-static void Uart_ProcessBudget(uint32_t budget);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -131,41 +101,16 @@ int main(void)
   MX_TIM2_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* 29강: 재생성 후에도 보존되는 USER CODE에서 우선순위를 맞춤. */
-  /* Group 4, 두 IRQ 모두 5/0: 큐 생산 콜백끼리 서로 선점하지 않음. */
-  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5u, 0u);
-  HAL_NVIC_SetPriority(USART2_IRQn, 5u, 0u);
-  HAL_NVIC_ClearPendingIRQ(DMA1_Stream5_IRQn);
-  HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
-  if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, dma_rx, DMA_RX_CAP) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* 25강: PCLK1=42MHz、115200/8N1、16배 샘플링. 현재 HAL의 BRR=0x016C. */
-  /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
-  button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
-  button_raw_pressed = button_candidate;
-  button_changed_at = HAL_GetTick();
-  /* 24강: PA0의 TIM2_CH1이 CPU 개입 없이 20kHz, 50% PWM을 생성함. */
-  /* 84MHz / (0+1) / (4199+1) = 20kHz, CCR1=2100이면 50%. */
-  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* 시작 직후 Duty를 바꾸지 않음. 버튼 요청 전까지 50%를 유지함. */
-  /* 23강: TIM6 84MHz / (8399+1) / (999+1) = 10Hz, Update 간격 100ms. */
-  /* HAL 초기화의 UG가 버퍼링된 PSC를 반영하며 UIF도 세울 수 있음. */
-  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
-  HAL_NVIC_ClearPendingIRQ(TIM6_DAC_IRQn);
-  /* HAL_Init의 Group 4 유지: 선점 4비트, 서브 0비트. MSP의 0을 덮어씀. */
-  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 5, 0);
-  /* 관찰: NVIC_GetPriorityGrouping() == 3, TIM6 논리 우선순위 == 5. */
-  /* NVIC 허용은 MSP에서 생성됨. Start_IT는 TIM6의 UIE와 카운터를 켬. */
-  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* PendSV(15)의 대기 중에도 TIM7의 HAL 1ms tick이 실행되도록 함. */
+  HAL_NVIC_SetPriority(TIM7_IRQn, 14U, 0U);
+  uwTickPrio = 14U; /* 이후 HAL tick 재설정에도 같은 우선순위를 유지함. */
+  /* 33강: 이전 DMA/PWM/TIM6 실습은 시작하지 않음. 설정은 유지함. */
+  /* MX_ThreadX_Init이 커널로 진입하며 이후 main 루프는 실행하지 않음. */
   /* USER CODE END 2 */
+
+  MX_ThreadX_Init();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -174,12 +119,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Rx_Recover();
-    /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
-    Button_Poll();
-    /* 31강: 큐가 빌 때까지 무제한 처리하지 않고 다음 루프에 실행을 넘김. */
-    Uart_ProcessBudget(16u);
-    /* 16바이트는 처리량 상한임. 실행 시간/마감 시간 보장은 별도 측정이 필요함. */
+    Error_Handler(); /* 커널에서 예상치 않게 복귀한 경우 */
   }
   /* USER CODE END 3 */
 }
@@ -409,229 +349,30 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-static void Uart_ProcessBudget(uint32_t budget)
-{
-  for (uint32_t i = 0u; i < budget; ++i)
-  {
-    uint8_t byte;
-    enum RxResult result = Rx_Pop(&byte);
-    if (result == RX_EMPTY)
-    {
-      break;
-    }
-    if (result == RX_GAP)
-    {
-      /* 다음 바이트 전에 조립 중인 패킷을 폐기함. */
-      Parser_Reset();
-      rx_gap_count++;
-      break;
-    }
-    uart_rx_count++;
-    uart_last_rx_byte = byte;
-    Parser_Feed(byte);
-  }
-}
+/* 33강: SysTick/PendSV는 ThreadX 포트, HAL tick은 TIM7 콜백 소유. */
+/* USER CODE END 4 */
 
-void Packet_OnValid(const uint8_t *data, uint8_t length)
-{
-  /* 검증된 Payload를 관찰용 배열로 복사함. LED/PWM 명령으로 임의 해석하지 않음. */
-  for (uint8_t i = 0u; i < length; ++i)
-  {
-    packet_last_payload[i] = data[i];
-  }
-  packet_last_length = length; /* 이 길이까지만 유효함. */
-  packet_valid_count++;
-}
-
-static void Rx_PushFromISR(uint8_t byte)
-{
-  uint32_t next = (head + 1u) % RX_CAP;
-  if (rx_overflow || next == tail)
-  {
-    rx_overflow = true;
-    rx_dropped++;
-    return;
-  }
-  rx_buf[head] = byte;
-  head = next;
-}
-
-static enum RxResult Rx_Pop(uint8_t *byte)
-{
-  /* volatile만으로 보호되지 않음. 짧게 마스킹하고 이전 상태를 복원함. */
-  uint32_t saved = __get_PRIMASK();
-  __disable_irq();
-  enum RxResult result = RX_EMPTY;
-  if (rx_overflow)
-  {
-    rx_dropped += (head + RX_CAP - tail) % RX_CAP;
-    tail = head;
-    rx_overflow = false;
-    result = RX_GAP;
-  }
-  else if (head != tail)
-  {
-    *byte = rx_buf[tail];
-    tail = (tail + 1u) % RX_CAP;
-    result = RX_BYTE;
-  }
-  __set_PRIMASK(saved);
-  return result;
-}
-
-static void Rx_QueuePushSpan(const uint8_t *data, uint32_t length)
-{
-  uint32_t free_bytes = (tail + RX_CAP - head - 1u) % RX_CAP;
-  if (rx_overflow || length > free_bytes)
-  {
-    rx_overflow = true;
-    rx_dropped += length;
-    return;
-  }
-  for (uint32_t i = 0u; i < length; ++i)
-  {
-    Rx_PushFromISR(data[i]);
-  }
-}
-
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
-{
-  (void)Size; /* IDLE/HT/TC 알림 크기는 패킷 길이가 아님. */
-  if (huart->Instance != USART2 || rx_restart_pending)
-  {
-    return;
-  }
-  /* 지연된 알림도 현재 NDTR로 계산하여 같은 구간을 중복 복사하지 않음. */
-  uint16_t pos = (uint16_t)(DMA_RX_CAP - __HAL_DMA_GET_COUNTER(huart->hdmarx));
-  if (pos == DMA_RX_CAP)
-  {
-    pos = 0u;
-  }
-  if (pos > consumed)
-  {
-    Rx_QueuePushSpan(&dma_rx[consumed], pos - consumed);
-  }
-  else if (pos < consumed)
-  {
-    Rx_QueuePushSpan(&dma_rx[consumed], DMA_RX_CAP - consumed);
-    if (pos != 0u)
-    {
-      Rx_QueuePushSpan(&dma_rx[0], pos);
-    }
-  }
-  consumed = pos;
-  /* Circular 수신은 재예약하지 않음. 연속 수신을 위해 HT/TC도 유지함. */
-  /* IRQ 지연+복사는 반 버퍼 수신 시간(약 5.55ms)보다 충분히 짧아야 함. */
-  /* 한 바퀴 이상 놓치면 NDTR만으로 손실을 알아내거나 복원할 수 없음. */
-}
-
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART2)
-  {
-    uart_last_rx_error = HAL_UART_GetError(huart);
-    uart_rx_errors++;
-    if ((uart_last_rx_error & HAL_UART_ERROR_DMA) != 0u)
-    {
-      rx_dma_errors++;
-      rx_dma_last_error = HAL_DMA_GetError(huart->hdmarx);
-    }
-    rx_overflow = true;
-    rx_restart_pending = true;
-  }
-}
-
-static void Rx_Recover(void)
-{
-  if (!rx_restart_pending)
-  {
-    return;
-  }
-  /* main에서 UART/DMA IRQ만 막음. DMA 중단 timeout에 필요한 SysTick은 유지함. */
-  HAL_NVIC_DisableIRQ(USART2_IRQn);
-  HAL_NVIC_DisableIRQ(DMA1_Stream5_IRQn);
-  HAL_StatusTypeDef status = HAL_UART_AbortReceive(&huart2);
-  if (status == HAL_OK && HAL_DMA_GetState(huart2.hdmarx) == HAL_DMA_STATE_BUSY)
-  {
-    status = HAL_DMA_Abort(huart2.hdmarx);
-  }
-  if (status == HAL_OK)
-  {
-    /* 수신을 멈춘 뒤 SR->DR로 잔여 오류/데이터를 버림. */
-    __HAL_UART_CLEAR_OREFLAG(&huart2);
-    HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
-    HAL_NVIC_ClearPendingIRQ(DMA1_Stream5_IRQn);
-    /* 큐는 다음 Rx_Pop에서 비우고 RX_GAP을 먼저 전달함. */
-    rx_overflow = true;
-    consumed = 0u;
-    status = HAL_UARTEx_ReceiveToIdle_DMA(&huart2, dma_rx, DMA_RX_CAP);
-  }
-  if (status == HAL_OK)
-  {
-    rx_restart_pending = false;
-    rx_recovery_count++;
-  }
-  if (status != HAL_OK)
-  {
-    /* 복구 실패를 무한 재시도로 숨기지 않음. */
-    Error_Handler();
-  }
-  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
-  HAL_NVIC_EnableIRQ(USART2_IRQn);
-}
-
-static void Button_Poll(void)
-{
-  bool raw = (GPIOC->IDR & (1u << 13)) == 0u;
-  uint32_t now = HAL_GetTick();
-  button_raw_pressed = raw;
-
-  if (raw != button_candidate)
-  {
-    button_candidate = raw;
-    button_changed_at = now;
-  }
-
-  /* 1ms HAL tick 기준의 예시값. 20ms는 모든 버튼의 최적값이 아님. */
-  /* unsigned 차이는 tick이 한 바퀴 돌아도 짧은 경과 시간을 계산함. */
-  if ((uint32_t)(now - button_changed_at) >= 20u &&
-      button_stable_pressed != button_candidate)
-  {
-    button_stable_pressed = button_candidate;
-    if (button_stable_pressed)
-    {
-      button_press_count++;
-      /* 24강 단계 B: 확정된 버튼 눌림으로 25%를 요청함. */
-      /* OC1 preload에 의해 다음 Update에 반영됨. 주파수는 20kHz 유지. */
-      __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 1050u);
-      /* 버튼은 눌림 횟수만 기록하고 LED를 변경하지 않음. */
-    }
-  }
-}
-
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM7 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance == TIM6)
-  {
-    /* TIM6_DAC_IRQHandler -> HAL_TIM_IRQHandler -> 이 콜백 순서임. */
-    /* HAL이 UIF/UIE 확인과 UIF 해제를 수행함. DAC 인터럽트는 사용하지 않음. */
-    tim6_irq_count++;
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    /* 약 100ms마다 전환. ISR에서는 대기하지 않음. */
-    /* 인터럽트 마스킹/선점으로 전환이 늦어질 수 있어 정밀 PWM은 아님. */
-  }
-}
+  /* USER CODE BEGIN Callback 0 */
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  if (GPIO_Pin == B1_Pin)
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM7)
   {
-    /* ISR은 기록만 함. 바운스로 한 번 눌러도 여러 번 호출될 수 있음. */
-    /* EXTI 횟수는 물리적 눌림 횟수가 아님. ISR에서 HAL_Delay를 쓰지 않음. */
-    button_exti_count++;
+    HAL_IncTick();
   }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
-/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
