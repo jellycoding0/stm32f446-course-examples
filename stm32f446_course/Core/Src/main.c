@@ -31,7 +31,8 @@ enum RxResult { RX_EMPTY, RX_BYTE, RX_GAP };
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define RX_CAP 64u
+#define RX_CAP 256u
+#define DMA_RX_CAP 128u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,6 +45,7 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 /* 관찰: 현재 입력, 확정 상태, EXTI 횟수와 확정된 눌림 횟수를 비교함. */
@@ -59,13 +61,15 @@ volatile uint32_t uart_rx_count;
 volatile uint32_t uart_rx_errors;
 volatile uint32_t uart_last_rx_error;
 volatile uint8_t uart_last_rx_byte;
-static uint8_t rx_byte;
+static uint8_t dma_rx[DMA_RX_CAP];
+static uint16_t consumed;
 static uint8_t rx_buf[RX_CAP];
 static volatile uint32_t head, tail;
 static volatile uint32_t rx_dropped;
 static volatile bool rx_overflow;
 static volatile bool rx_restart_pending;
-volatile uint32_t rx_rearm_fail;
+volatile uint32_t rx_dma_errors;
+volatile uint32_t rx_dma_last_error;
 volatile uint32_t rx_gap_count;
 volatile uint32_t rx_recovery_count;
 /* USER CODE END PV */
@@ -73,6 +77,7 @@ volatile uint32_t rx_recovery_count;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART2_UART_Init(void);
@@ -116,14 +121,18 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM6_Init();
   MX_TIM2_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* 27강: Group 4에서 USART2 선점 우선순위 5. 생성된 MSP의 0을 덮어씀. */
+  /* 29강: 재생성 후에도 보존되는 USER CODE에서 우선순위를 맞춤. */
+  /* Group 4, 두 IRQ 모두 5/0: 큐 생산 콜백끼리 서로 선점하지 않음. */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5u, 0u);
   HAL_NVIC_SetPriority(USART2_IRQn, 5u, 0u);
+  HAL_NVIC_ClearPendingIRQ(DMA1_Stream5_IRQn);
   HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
-  if (HAL_UART_Receive_IT(&huart2, &rx_byte, 1u) != HAL_OK)
+  if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, dma_rx, DMA_RX_CAP) != HAL_OK)
   {
     Error_Handler();
   }
@@ -161,7 +170,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Rx_Recover();
-    /* ISR은 저장, main은 소비. 배열 64칸 중 63바이트를 사용할 수 있음. */
+    /* DMA 128바이트와 소프트웨어 큐 256칸(유효 255바이트)은 별개임. */
     uint8_t byte;
     enum RxResult result = Rx_Pop(&byte);
     if (result == RX_BYTE)
@@ -348,6 +357,22 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -425,25 +450,50 @@ static enum RxResult Rx_Pop(uint8_t *byte)
   return result;
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+static void Rx_QueuePushSpan(const uint8_t *data, uint32_t length)
 {
-  if (huart->Instance == USART2)
+  uint32_t free_bytes = (tail + RX_CAP - head - 1u) % RX_CAP;
+  if (rx_overflow || length > free_bytes)
   {
-    /* 오류가 있는 바이트는 큐에 넣지 않음. 재수신하면 ErrorCode가 지워짐. */
-    /* 뒤이어 호출될 ErrorCallback이 기록하고 main의 Rx_Recover가 재시작함. */
-    if (HAL_UART_GetError(huart) != HAL_UART_ERROR_NONE)
+    rx_overflow = true;
+    rx_dropped += length;
+    return;
+  }
+  for (uint32_t i = 0u; i < length; ++i)
+  {
+    Rx_PushFromISR(data[i]);
+  }
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+  (void)Size; /* IDLE/HT/TC 알림 크기는 패킷 길이가 아님. */
+  if (huart->Instance != USART2 || rx_restart_pending)
+  {
+    return;
+  }
+  /* 지연된 알림도 현재 NDTR로 계산하여 같은 구간을 중복 복사하지 않음. */
+  uint16_t pos = (uint16_t)(DMA_RX_CAP - __HAL_DMA_GET_COUNTER(huart->hdmarx));
+  if (pos == DMA_RX_CAP)
+  {
+    pos = 0u;
+  }
+  if (pos > consumed)
+  {
+    Rx_QueuePushSpan(&dma_rx[consumed], pos - consumed);
+  }
+  else if (pos < consumed)
+  {
+    Rx_QueuePushSpan(&dma_rx[consumed], DMA_RX_CAP - consumed);
+    if (pos != 0u)
     {
-      return;
-    }
-    Rx_PushFromISR(rx_byte);
-    if (!rx_restart_pending &&
-        HAL_UART_Receive_IT(huart, &rx_byte, 1u) != HAL_OK)
-    {
-      rx_rearm_fail++;
-      rx_overflow = true;
-      rx_restart_pending = true;
+      Rx_QueuePushSpan(&dma_rx[0], pos);
     }
   }
+  consumed = pos;
+  /* Circular 수신은 재예약하지 않음. 연속 수신을 위해 HT/TC도 유지함. */
+  /* IRQ 지연+복사는 반 버퍼 수신 시간(약 5.55ms)보다 충분히 짧아야 함. */
+  /* 한 바퀴 이상 놓치면 NDTR만으로 손실을 알아내거나 복원할 수 없음. */
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -452,6 +502,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   {
     uart_last_rx_error = HAL_UART_GetError(huart);
     uart_rx_errors++;
+    if ((uart_last_rx_error & HAL_UART_ERROR_DMA) != 0u)
+    {
+      rx_dma_errors++;
+      rx_dma_last_error = HAL_DMA_GetError(huart->hdmarx);
+    }
     rx_overflow = true;
     rx_restart_pending = true;
   }
@@ -463,30 +518,37 @@ static void Rx_Recover(void)
   {
     return;
   }
-  /* main에서만 복구. 이 강의는 DMA 없이 1바이트 IT 수신만 사용함. */
-  uint32_t saved = __get_PRIMASK();
-  __disable_irq();
+  /* main에서 UART/DMA IRQ만 막음. DMA 중단 timeout에 필요한 SysTick은 유지함. */
+  HAL_NVIC_DisableIRQ(USART2_IRQn);
+  HAL_NVIC_DisableIRQ(DMA1_Stream5_IRQn);
   HAL_StatusTypeDef status = HAL_UART_AbortReceive(&huart2);
+  if (status == HAL_OK && HAL_DMA_GetState(huart2.hdmarx) == HAL_DMA_STATE_BUSY)
+  {
+    status = HAL_DMA_Abort(huart2.hdmarx);
+  }
   if (status == HAL_OK)
   {
     /* 수신을 멈춘 뒤 SR->DR로 잔여 오류/데이터를 버림. */
     __HAL_UART_CLEAR_OREFLAG(&huart2);
     HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
+    HAL_NVIC_ClearPendingIRQ(DMA1_Stream5_IRQn);
     /* 큐는 다음 Rx_Pop에서 비우고 RX_GAP을 먼저 전달함. */
     rx_overflow = true;
-    status = HAL_UART_Receive_IT(&huart2, &rx_byte, 1u);
+    consumed = 0u;
+    status = HAL_UARTEx_ReceiveToIdle_DMA(&huart2, dma_rx, DMA_RX_CAP);
   }
   if (status == HAL_OK)
   {
     rx_restart_pending = false;
     rx_recovery_count++;
   }
-  __set_PRIMASK(saved);
   if (status != HAL_OK)
   {
     /* 복구 실패를 무한 재시도로 숨기지 않음. */
     Error_Handler();
   }
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
 
 static void Button_Poll(void)
