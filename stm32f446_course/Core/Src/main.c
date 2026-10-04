@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,16 +42,20 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-const unsigned limit = 100u;
-unsigned period_ms = 500u;
-unsigned event_count;
+/* 관찰: 현재 입력, 확정 상태, EXTI 횟수와 확정된 눌림 횟수를 비교함. */
+volatile bool button_raw_pressed;
+volatile bool button_stable_pressed;
+volatile uint32_t button_exti_count;
+volatile uint32_t button_press_count;
+static bool button_candidate;
+static uint32_t button_changed_at;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void Button_Poll(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -89,7 +93,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
-
+  /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
+  button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
+  button_raw_pressed = button_candidate;
+  button_changed_at = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -99,25 +106,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* 17강: PA5는 main만 제어함. 두 방식 모두 High/Low를 500ms씩 유지함. */
-    /* ODR: 읽기-수정-쓰기이므로 다른 흐름의 GPIOA 변경을 덮어쓸 수 있음. */
-    GPIOA->ODR |= GPIO_PIN_5;
-    HAL_Delay(period_ms);
-    GPIOA->ODR &= ~(uint32_t)GPIO_PIN_5;
-    HAL_Delay(period_ms);
-
-    /* BSRR: 하위 16비트는 Set, 상위 16비트는 Reset 명령임. |=를 쓰지 않음. */
-    GPIOA->BSRR = GPIO_PIN_5;
-    HAL_Delay(period_ms);
-    GPIOA->BSRR = (uint32_t)GPIO_PIN_5 << 16u;
-    HAL_Delay(period_ms);
-    /* 같은 핀의 동시 제어까지 보호하지는 않음. 실제 ISR 경쟁은 만들지 않음. */
-    /* ODR 1회 + BSRR 1회의 점멸 비교를 마치면 횟수를 증가시킴. */
-    event_count++;
-    if (event_count >= limit)
-    {
-      event_count = 0u;
-    }
+    /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
+    Button_Poll();
   }
   /* USER CODE END 3 */
 }
@@ -182,10 +172,17 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LED_Pin */
   GPIO_InitStruct.Pin = LED_Pin;
@@ -194,13 +191,51 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+static void Button_Poll(void)
+{
+  bool raw = (GPIOC->IDR & (1u << 13)) == 0u;
+  uint32_t now = HAL_GetTick();
+  button_raw_pressed = raw;
 
+  if (raw != button_candidate)
+  {
+    button_candidate = raw;
+    button_changed_at = now;
+  }
+
+  /* 1ms HAL tick 기준의 예시값. 20ms는 모든 버튼의 최적값이 아님. */
+  /* unsigned 차이는 tick이 한 바퀴 돌아도 짧은 경과 시간을 계산함. */
+  if ((uint32_t)(now - button_changed_at) >= 20u &&
+      button_stable_pressed != button_candidate)
+  {
+    button_stable_pressed = button_candidate;
+    if (button_stable_pressed)
+    {
+      button_press_count++;
+      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    }
+  }
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == B1_Pin)
+  {
+    /* ISR은 기록만 함. 바운스로 한 번 눌러도 여러 번 호출될 수 있음. */
+    /* EXTI 횟수는 물리적 눌림 횟수가 아님. ISR에서 HAL_Delay를 쓰지 않음. */
+    button_exti_count++;
+  }
+}
 /* USER CODE END 4 */
 
 /**
