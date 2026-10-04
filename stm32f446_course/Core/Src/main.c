@@ -99,8 +99,20 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+    /* 17강: PA5는 main만 제어함. 두 방식 모두 High/Low를 500ms씩 유지함. */
+    /* ODR: 읽기-수정-쓰기이므로 다른 흐름의 GPIOA 변경을 덮어쓸 수 있음. */
+    GPIOA->ODR |= GPIO_PIN_5;
     HAL_Delay(period_ms);
+    GPIOA->ODR &= ~(uint32_t)GPIO_PIN_5;
+    HAL_Delay(period_ms);
+
+    /* BSRR: 하위 16비트는 Set, 상위 16비트는 Reset 명령임. |=를 쓰지 않음. */
+    GPIOA->BSRR = GPIO_PIN_5;
+    HAL_Delay(period_ms);
+    GPIOA->BSRR = (uint32_t)GPIO_PIN_5 << 16u;
+    HAL_Delay(period_ms);
+    /* 같은 핀의 동시 제어까지 보호하지는 않음. 실제 ISR 경쟁은 만들지 않음. */
+    /* ODR 1회 + BSRR 1회의 점멸 비교를 마치면 횟수를 증가시킴. */
     event_count++;
     if (event_count >= limit)
     {
