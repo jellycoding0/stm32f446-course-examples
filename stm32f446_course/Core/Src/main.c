@@ -57,6 +57,10 @@ static uint32_t button_changed_at;
 volatile uint32_t tim6_irq_count;
 volatile uint32_t uart_tx_count;
 volatile uint32_t uart_tx_failures;
+volatile uint32_t uart_rx_count;
+volatile uint32_t uart_rx_timeouts;
+volatile uint32_t uart_rx_errors;
+volatile uint32_t uart_last_rx_error;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -107,7 +111,6 @@ int main(void)
   MX_TIM2_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  uint32_t uart_last = HAL_GetTick();
   /* 25강: PCLK1=42MHz、115200/8N1、16배 샘플링. 현재 HAL의 BRR=0x016C. */
   /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
@@ -141,13 +144,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint32_t now = HAL_GetTick();
-    if ((uint32_t)(now - uart_last) >= 100u)
+    /* 26강: main만 UART를 소유하며, 받은 1바이트를 그대로 돌려보냄. */
+    uint8_t byte;
+    HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, &byte, 1u, 10u);
+    /* 다음 UART API가 오류값을 바꾸기 전에 보관함. */
+    uint32_t error = HAL_UART_GetError(&huart2);
+    uart_last_rx_error = error;
+    if (status == HAL_OK)
     {
-      uart_last = now;
-      /* 0x55는 LSB부터 1/0이 번갈아 나와 UART 비트 시간 관찰에 적합함. */
-      uint8_t byte = 0x55u;
-      /* main만 UART를 사용함. 유한 대기이며 송신 실패도 기록함. */
+      uart_rx_count++;
+      /* 송신은 새 10ms 예산을 사용하며 HAL 내부에서 TXE와 TC를 기다림. */
       if (HAL_UART_Transmit(&huart2, &byte, 1u, 10u) == HAL_OK)
       {
         uart_tx_count++;
@@ -157,8 +163,19 @@ int main(void)
         uart_tx_failures++;
       }
     }
+    else if (error != HAL_UART_ERROR_NONE || status != HAL_TIMEOUT)
+    {
+      /* 현재 HAL은 RXNE 대기 중 ORE도 HAL_TIMEOUT으로 반환할 수 있음. */
+      uart_rx_errors++;
+    }
+    else
+    {
+      uart_rx_timeouts++;
+    }
+    /* HAL의 timeout은 경과 tick > 10일 때 성립하며 SysTick이 필요함. */
+    /* 폴링 대기 동안 main의 버튼 처리는 늦어지나 허용된 ISR은 실행됨. */
     /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
-    /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
+    /* UART 대기 때문에 짧은 버튼 변화는 놓칠 수 있음. */
     Button_Poll();
   }
   /* USER CODE END 3 */
