@@ -40,6 +40,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN PV */
@@ -58,6 +59,7 @@ volatile uint32_t tim6_irq_count;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 static void Button_Poll(void);
 /* USER CODE END PFP */
@@ -97,11 +99,19 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM6_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
   button_raw_pressed = button_candidate;
   button_changed_at = HAL_GetTick();
+  /* 24강: PA0의 TIM2_CH1이 CPU 개입 없이 20kHz, 50% PWM을 생성함. */
+  /* 84MHz / (0+1) / (4199+1) = 20kHz, CCR1=2100이면 50%. */
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* 시작 직후 Duty를 바꾸지 않음. 버튼 요청 전까지 50%를 유지함. */
   /* 23강: TIM6 84MHz / (8399+1) / (999+1) = 10Hz, Update 간격 100ms. */
   /* HAL 초기화의 UG가 버퍼링된 PSC를 반영하며 UIF도 세울 수 있음. */
   __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
@@ -175,6 +185,55 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4199;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 2100;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
+
 }
 
 /**
@@ -278,6 +337,9 @@ static void Button_Poll(void)
     if (button_stable_pressed)
     {
       button_press_count++;
+      /* 24강 단계 B: 확정된 버튼 눌림으로 25%를 요청함. */
+      /* OC1 preload에 의해 다음 Update에 반영됨. 주파수는 20kHz 유지. */
+      __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 1050u);
       /* 버튼은 눌림 횟수만 기록하고 LED를 변경하지 않음. */
     }
   }
