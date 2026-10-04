@@ -97,6 +97,8 @@ int main(void)
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
   button_raw_pressed = button_candidate;
   button_changed_at = HAL_GetTick();
+  uint32_t last = HAL_GetTick();
+  /* 19강: SysTick_Handler의 HAL_IncTick이 기본 1ms 시간 기준을 만듦. */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -106,6 +108,15 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint32_t now = HAL_GetTick();
+    /* HAL_Delay와 달리 기다리지 않으므로 매 루프에서 버튼도 처리함. */
+    /* unsigned 차이를 사용하며, tick 전체 순환보다 자주 검사해야 함. */
+    if ((uint32_t)(now - last) >= 500u)
+    {
+      last = now;
+      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    }
+    /* 다른 작업이 오래 걸리면 LED 전환도 늦어짐. 하드웨어 파형은 아님. */
     /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
     Button_Poll();
   }
@@ -222,7 +233,7 @@ static void Button_Poll(void)
     if (button_stable_pressed)
     {
       button_press_count++;
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+      /* LED는 main의 주기 처리만 제어하고, 버튼은 눌림 횟수만 기록함. */
     }
   }
 }
