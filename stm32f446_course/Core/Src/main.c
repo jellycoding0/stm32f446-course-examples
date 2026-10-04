@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
+#include "packet_parser.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -72,6 +73,9 @@ volatile uint32_t rx_dma_errors;
 volatile uint32_t rx_dma_last_error;
 volatile uint32_t rx_gap_count;
 volatile uint32_t rx_recovery_count;
+volatile uint32_t packet_valid_count;
+volatile uint8_t packet_last_length;
+volatile uint8_t packet_last_payload[32];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -177,10 +181,12 @@ int main(void)
     {
       uart_rx_count++;
       uart_last_rx_byte = byte;
+      Parser_Feed(byte);
     }
     else if (result == RX_GAP)
     {
-      /* 손실 전후 데이터를 이어 붙이지 않음. 향후 파서는 여기서 초기화함. */
+      /* 다음 바이트 전에 조립 중인 패킷을 폐기함. ISR에서는 파서를 만지지 않음. */
+      Parser_Reset();
       rx_gap_count++;
     }
     /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
@@ -414,6 +420,17 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void Packet_OnValid(const uint8_t *data, uint8_t length)
+{
+  /* 검증된 Payload를 관찰용 배열로 복사함. LED/PWM 명령으로 임의 해석하지 않음. */
+  for (uint8_t i = 0u; i < length; ++i)
+  {
+    packet_last_payload[i] = data[i];
+  }
+  packet_last_length = length; /* 이 길이까지만 유효함. */
+  packet_valid_count++;
+}
+
 static void Rx_PushFromISR(uint8_t byte)
 {
   uint32_t next = (head + 1u) % RX_CAP;
