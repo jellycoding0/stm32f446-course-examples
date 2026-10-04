@@ -43,6 +43,8 @@
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 
+UART_HandleTypeDef huart2;
+
 /* USER CODE BEGIN PV */
 /* 관찰: 현재 입력, 확정 상태, EXTI 횟수와 확정된 눌림 횟수를 비교함. */
 volatile bool button_raw_pressed;
@@ -53,6 +55,8 @@ static bool button_candidate;
 static uint32_t button_changed_at;
 /* 관찰: TIM6 콜백 처리 횟수. 인터럽트 지연 중 합쳐진 Update는 세지 못함. */
 volatile uint32_t tim6_irq_count;
+volatile uint32_t uart_tx_count;
+volatile uint32_t uart_tx_failures;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,6 +64,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void Button_Poll(void);
 /* USER CODE END PFP */
@@ -100,7 +105,10 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM6_Init();
   MX_TIM2_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  uint32_t uart_last = HAL_GetTick();
+  /* 25강: PCLK1=42MHz、115200/8N1、16배 샘플링. 현재 HAL의 BRR=0x016C. */
   /* 시작부터 눌려 있으면 20ms 안정 확인 후 첫 눌림으로 판정함. */
   button_candidate = (GPIOC->IDR & (1u << 13)) == 0u;
   button_raw_pressed = button_candidate;
@@ -133,6 +141,22 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint32_t now = HAL_GetTick();
+    if ((uint32_t)(now - uart_last) >= 100u)
+    {
+      uart_last = now;
+      /* 0x55는 LSB부터 1/0이 번갈아 나와 UART 비트 시간 관찰에 적합함. */
+      uint8_t byte = 0x55u;
+      /* main만 UART를 사용함. 유한 대기이며 송신 실패도 기록함. */
+      if (HAL_UART_Transmit(&huart2, &byte, 1u, 10u) == HAL_OK)
+      {
+        uart_tx_count++;
+      }
+      else
+      {
+        uart_tx_failures++;
+      }
+    }
     /* TIM6 폴링 없이 버튼을 처리함. LED는 TIM6 콜백만 제어함. */
     /* 지연 없이 자주 호출하여 눌림과 놓임을 모두 안정 판정함. */
     Button_Poll();
@@ -271,6 +295,39 @@ static void MX_TIM6_Init(void)
   /* USER CODE BEGIN TIM6_Init 2 */
 
   /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
 
 }
 
