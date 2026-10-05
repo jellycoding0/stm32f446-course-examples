@@ -15,6 +15,24 @@ NUCLEO-F446RE로 진행하는 MCU 임베디드 SW 강의의 수강생용 참고 
 
 직접 만드는 실습 프로젝트와 내려받은 참고 저장소는 별도 폴더로 관리합니다. 완성된 참고 프로젝트를 빌드하기 위해 CubeMX 코드를 다시 생성할 필요는 없습니다.
 
+## 하드웨어 참고 자료
+
+실습 중 핀 연결이나 레지스터 동작을 확인할 때는 아래 PDF를 참고합니다. 자료는 [`student-guides/hw_spec/`](student-guides/hw_spec/)에 모아 두었습니다.
+
+| 자료 | 확인할 내용 |
+| --- | --- |
+| [보드 회로도 — MB1136 C04](student-guides/hw_spec/mb1136-default-c04_schematic.pdf) | LED·버튼·전원·ST-LINK·커넥터의 실제 배선과 솔더 브리지 |
+| [보드 사용자 매뉴얼 — UM1724](student-guides/hw_spec/board_user_manual_um1724.pdf) | Nucleo 보드의 커넥터·점퍼·내장 ST-LINK 연결 등 보드 구성 |
+| [STM32F446 데이터시트](student-guides/hw_spec/mcu_datasheet_stm32f446.pdf) | MCU 핀 배치·대체 기능(AF), 전기적 특성과 동작 조건 |
+| [주변장치 레퍼런스 매뉴얼 — RM0390](student-guides/hw_spec/mcu_reference_manual_rm0390.pdf) | RCC·GPIO·타이머·USART·DMA 등 주변장치의 동작과 레지스터·비트 정의 |
+| [Cortex-M4 프로그래밍 매뉴얼 — PM0214](student-guides/hw_spec/mcu_programming_manual_pm0214.pdf) | 코어 레지스터, 예외·인터럽트, NVIC·SysTick 등 CPU 구조 |
+
+**실제 배선은 회로도, 보드 사용법·점퍼 설정은 UM1724, 핀의 기능·전기 조건은 데이터시트, 주변장치 비트는 RM0390, CPU의 예외 처리는 PM0214**에서 찾으면 됩니다. 문서가 여러 모델을 함께 설명하는 경우 NUCLEO-F446RE·STM32F446RE와 사용하는 보드 리비전·패키지에 해당하는 항목인지 확인합니다.
+
+06강에서는 회로도 3쪽(MCU)에서 LED·버튼 연결을, 4쪽에서 ST-LINK를, 5쪽에서 확장 커넥터를 확인합니다. 제공한 회로도는 **MB1136 C04** 기준이므로 보드의 리비전과 실제 솔더 브리지 상태를 함께 확인합니다. 다른 리비전의 회로도는 [ST 공식 보드 페이지의 CAD Resources](https://www.st.com/en/evaluation-tools/nucleo-f446re.html#cad-resources)에서 찾습니다.
+
+이 자료와 최신 사용 안내는 `main` 기준입니다. 과거 강의 Tag에 자료가 없다면 GitHub의 `main`에서 열어 두고 실습합니다.
+
 ## 강의 기준 환경
 
 | 항목 | 기준 |
@@ -127,6 +145,7 @@ git switch main
 | `stm32f446_course/Drivers/` | HAL·CMSIS 라이브러리 |
 | `stm32f446_course/Middlewares/` | 33강부터 사용하는 ThreadX 소스 |
 | `student-guides/` | 수강생에게 공유하는 설치·사용·설정 문서 |
+| `student-guides/hw_spec/` | 보드·MCU·주변장치·Cortex-M4 참고 PDF |
 
 강의 코드는 하나의 `main` 이력과 강의별 annotated Tag로 관리합니다. 최신 안내 문서는 `main`에서 갱신합니다. 로컬 검증 기록, IDE Workspace, 로그와 빌드 산출물은 공유 대상에서 제외합니다. 공급 라이브러리의 라이선스와 저작권 표시는 각 파일·폴더의 내용을 따릅니다.
 
