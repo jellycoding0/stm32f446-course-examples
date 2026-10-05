@@ -14,3 +14,7 @@
 # Course documents remain local; keep lesson diffs focused on firmware.
 *.[mM][dD]
 /docs/
+
+# Share the repository introduction and all student Markdown guides.
+!/README.md
+!/student-guides/**/*.[mM][dD]
